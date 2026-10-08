@@ -19,9 +19,10 @@ class ScheduleFormattingTests(unittest.TestCase):
         self.assertEqual(lessons_for_day(lessons, now), [lessons[0]])
 
     def test_room_is_prominent_and_html_safe(self):
-        text = reminder_text({"дисциплина": "лаб <Python>", "преподаватель": "Иванова", "аудитория": "1-305", "начало": "10:15", "конец": "11:50"})
+        text = reminder_text({"дисциплина": "лаб <Python>", "преподаватель": "Иванова", "аудитория": "1-305", "начало": "10:15", "конец": "11:50"}, 10)
         self.assertIn("АУДИТОРИЯ: 1-305", text)
         self.assertIn("&lt;Python&gt;", text)
+        self.assertIn("Через 10 мин.", text)
 
     def test_day_off_message(self):
         self.assertIn("пар нет", day_off_text(datetime(2026, 10, 9)))
@@ -78,6 +79,19 @@ class ScheduleFormattingTests(unittest.TestCase):
         self.assertEqual(updated, [])
         self.assertEqual(cancelled[0]["код"], 1)
         self.assertIn("отменена", lesson_cancelled_text(cancelled[0]))
+
+    def test_schedule_changes_ignore_service_fields(self):
+        previous = lessons_by_key([
+            {"код": 1, "дисциплина": "Математика", "аудитория": "1-101", "служебное": "old"},
+        ])
+        current = lessons_by_key([
+            {"код": 1, "дисциплина": "Математика", "аудитория": "1-101", "служебное": "new"},
+        ])
+
+        updated, cancelled = schedule_changes(previous, current)
+
+        self.assertEqual(updated, [])
+        self.assertEqual(cancelled, [])
 
     def test_updated_schedule_message_has_current_lesson_information(self):
         text = schedule_updated_text({
