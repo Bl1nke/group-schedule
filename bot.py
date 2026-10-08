@@ -316,8 +316,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
     @dp.message(Command("start"))
     async def start(message: Message) -> None:
         await message.answer(
-            f"Я напоминаю ВИС23 о парах за {settings.reminder_minutes} мин. "
-            "Команда /chatid покажет ID этого чата."
+            "Я напоминаю ВИС23 о парах на сегодняшний день "
         )
 
     @dp.message(Command("chatid"))
