@@ -31,8 +31,8 @@ class Settings:
     group_id: int = 73001
     timezone: ZoneInfo = ZoneInfo("Europe/Moscow")
     reminder_minutes: int = 10
-    day_off_hour: int = 8
-    day_off_minute: int = 0
+    daily_schedule_hour: int = 7
+    daily_schedule_minute: int = 30
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -47,8 +47,8 @@ class Settings:
             group_id=int(os.getenv("GROUP_ID", "73001")),
             timezone=ZoneInfo(os.getenv("TIMEZONE", "Europe/Moscow")),
             reminder_minutes=int(os.getenv("REMINDER_MINUTES", "10")),
-            day_off_hour=int(os.getenv("DAY_OFF_HOUR", "8")),
-            day_off_minute=int(os.getenv("DAY_OFF_MINUTE", "0")),
+            daily_schedule_hour=int(os.getenv("DAILY_SCHEDULE_HOUR", "7")),
+            daily_schedule_minute=int(os.getenv("DAILY_SCHEDULE_MINUTE", "30")),
         )
 
 
@@ -119,6 +119,26 @@ def day_off_text(now: datetime) -> str:
     return f"☀️ <b>{now:%d.%m}</b> — сегодня пар нет. Отдыхаем!"
 
 
+def daily_schedule_text(lessons: list[dict[str, Any]], now: datetime) -> str:
+    """Формирует утреннее сообщение с расписанием на текущий день."""
+    if not lessons:
+        return day_off_text(now)
+
+    items = []
+    for number, lesson in enumerate(lessons, start=1):
+        subject = html.escape(str(lesson.get("дисциплина") or "Предмет не указан"))
+        teacher = html.escape(str(lesson.get("преподаватель") or "Преподаватель не указан"))
+        room = html.escape(str(lesson.get("аудитория") or "уточняется"))
+        start = html.escape(str(lesson.get("начало") or ""))
+        end = html.escape(str(lesson.get("конец") or ""))
+        items.append(
+            f"<b>{number}. {start}–{end}</b> — {subject}\n"
+            f"👨‍🏫 {teacher}\n"
+            f"📍 {room}"
+        )
+    return f"☀️ <b>Расписание на {now:%d.%m}</b>\n\n" + "\n\n".join(items)
+
+
 async def scheduler(bot: Bot, settings: Settings, state: SentState) -> None:
     """Проверяет актуальное расписание раз в 30 секунд."""
     async with aiohttp.ClientSession(headers={"User-Agent": "VIS23-Schedule-Telegram-Bot/1.0"}) as session:
@@ -126,11 +146,14 @@ async def scheduler(bot: Bot, settings: Settings, state: SentState) -> None:
             now = datetime.now(settings.timezone).replace(second=0, microsecond=0)
             try:
                 lessons = lessons_for_day(await fetch_lessons(session, settings), now)
-                rest_at = now.replace(hour=settings.day_off_hour, minute=settings.day_off_minute)
-                rest_key = f"{now:%Y-%m-%d}:rest"
-                if not lessons and now == rest_at and not state.contains(rest_key):
-                    await bot.send_message(settings.chat_id, day_off_text(now))
-                    state.add(rest_key)
+                daily_schedule_at = now.replace(
+                    hour=settings.daily_schedule_hour,
+                    minute=settings.daily_schedule_minute,
+                )
+                daily_schedule_key = f"{now:%Y-%m-%d}:daily_schedule"
+                if now == daily_schedule_at and not state.contains(daily_schedule_key):
+                    await bot.send_message(settings.chat_id, daily_schedule_text(lessons, now))
+                    state.add(daily_schedule_key)
 
                 for lesson in lessons:
                     start = lesson_start(lesson, settings.timezone)
