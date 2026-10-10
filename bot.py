@@ -22,16 +22,7 @@ from dotenv import load_dotenv
 
 SCHEDULE_URL = "https://lk.donstu.ru/api/Rasp"
 STATE_PATH = Path("data/bot_state.json")
-SCHEDULE_SNAPSHOT_PATH = Path("data/schedule_snapshot.json")
 FETCH_INTERVAL = timedelta(minutes=5)
-COMPARE_FIELDS = (
-    "датаНачала",
-    "начало",
-    "конец",
-    "дисциплина",
-    "преподаватель",
-    "аудитория",
-)
 
 
 @dataclass(frozen=True)
@@ -40,7 +31,7 @@ class Settings:
     chat_id: int
     group_id: int = 73001
     timezone: ZoneInfo = ZoneInfo("Europe/Moscow")
-    reminder_minutes: int = 22
+    reminder_minutes: int = 20
     daily_schedule_hour: int = 7
     daily_schedule_minute: int = 30
     send_day_off_message: bool = True
@@ -57,7 +48,7 @@ class Settings:
             chat_id=int(chat_id),
             group_id=int(os.getenv("GROUP_ID", "73001")),
             timezone=ZoneInfo(os.getenv("TIMEZONE", "Europe/Moscow")),
-            reminder_minutes=int(os.getenv("REMINDER_MINUTES", "22")),
+            reminder_minutes=int(os.getenv("REMINDER_MINUTES", "20")),
             daily_schedule_hour=int(os.getenv("DAILY_SCHEDULE_HOUR", "7")),
             daily_schedule_minute=int(os.getenv("DAILY_SCHEDULE_MINUTE", "30")),
             send_day_off_message=os.getenv("SEND_DAY_OFF_MESSAGE", "true").lower()
@@ -89,32 +80,6 @@ class SentState:
         self.keys = {item for item in self.keys if item >= cutoff}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(sorted(self.keys), ensure_ascii=False), encoding="utf-8")
-
-
-class ScheduleSnapshot:
-    """Последняя версия расписания, нужная для поиска изменений между опросами."""
-
-    def __init__(self, timezone: ZoneInfo, path: Path = SCHEDULE_SNAPSHOT_PATH) -> None:
-        self.path = path
-        self.timezone = timezone
-        self.days = self._load()
-
-    def _load(self) -> dict[str, dict[str, dict[str, Any]]]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-    def get(self, day: str) -> dict[str, dict[str, Any]] | None:
-        return self.days.get(day)
-
-    def save(self, day: str, lessons: dict[str, dict[str, Any]]) -> None:
-        self.days[day] = lessons
-        cutoff = (datetime.now(self.timezone).date() - timedelta(days=7)).isoformat()
-        self.days = {date: value for date, value in self.days.items() if date >= cutoff}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.days, ensure_ascii=False, sort_keys=True), encoding="utf-8")
 
 
 async def fetch_lessons(session: aiohttp.ClientSession, settings: Settings) -> list[dict[str, Any]]:
@@ -163,57 +128,6 @@ def reminder_text(lesson: dict[str, Any], minutes: int) -> str:
     )
 
 
-def schedule_updated_text(lesson: dict[str, Any]) -> str:
-    """Сообщение об изменённой или новой паре без ложного отсчёта до начала."""
-    fields = format_lesson(lesson)
-    return (
-        "ℹ️ <b>Расписание обновлено</b>\n\n"
-        f"📚 <b>{fields['subject']}</b>\n"
-        f"👨‍🏫 {fields['teacher']}\n"
-        f"🕒 {fields['start']}–{fields['end']}\n\n"
-        f"📍 <b>АУДИТОРИЯ: {fields['room']}</b>"
-    )
-
-
-def lesson_key(lesson: dict[str, Any]) -> str:
-    """Возвращает устойчивый идентификатор пары из данных API."""
-    code = lesson.get("код")
-    if code:
-        return f"code:{code}"
-    return ":".join(
-        str(lesson.get(field, ""))
-        for field in ("датаНачала", "дисциплина", "преподаватель")
-    )
-
-
-def lessons_by_key(lessons: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    return {lesson_key(lesson): lesson for lesson in lessons}
-
-
-def schedule_changes(
-    previous: dict[str, dict[str, Any]], current: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Возвращает добавленные/изменённые и отменённые пары."""
-    updated = [
-        lesson
-        for key, lesson in current.items()
-        if key not in previous or any(
-            lesson.get(field) != previous[key].get(field)
-            for field in COMPARE_FIELDS
-        )
-    ]
-    cancelled = [lesson for key, lesson in previous.items() if key not in current]
-    return updated, cancelled
-
-
-def lesson_cancelled_text(lesson: dict[str, Any]) -> str:
-    fields = format_lesson(lesson)
-    return (
-        "ℹ️ <b>Расписание обновлено</b>\n\n"
-        f"Пара «<b>{fields['subject']}</b>» в {fields['start']} отменена."
-    )
-
-
 def day_off_text(now: datetime) -> str:
     return f"☀️ <b>{now:%d.%m}</b> — сегодня пар нет. Отдыхаем!"
 
@@ -238,10 +152,8 @@ async def scheduler(
     bot: Bot,
     settings: Settings,
     state: SentState,
-    snapshot: ScheduleSnapshot | None = None,
 ) -> None:
-    """Проверяет актуальное расписание раз в 30 секунд."""
-    snapshot = snapshot or ScheduleSnapshot(settings.timezone)
+    """Проверяет расписание для утренней рассылки и напоминаний."""
     all_lessons: list[dict[str, Any]] = []
     last_fetch: datetime | None = None
     has_schedule_data = False
@@ -254,31 +166,8 @@ async def scheduler(
                     last_fetch = now
                     fetched_lessons = await fetch_lessons(session, settings)
 
-                    date_key = now.date().isoformat()
-                    current_lessons = lessons_by_key(lessons_for_day(fetched_lessons, now))
-                    previous_lessons = snapshot.get(date_key)
-                    # Пустой ответ иногда отдаёт сам API. Не считаем это массовой отменой.
-                    if previous_lessons and not current_lessons:
-                        logging.warning("API вернул пустое расписание при непустом сохранённом расписании")
-                    else:
-                        all_lessons = fetched_lessons
-                        has_schedule_data = True
-                        updated: list[dict[str, Any]] = []
-                        cancelled: list[dict[str, Any]] = []
-                        if previous_lessons is not None:
-                            updated, cancelled = schedule_changes(previous_lessons, current_lessons)
-                        # Сохраняем снимок до отправки: ошибка Telegram не создаст дубли.
-                        snapshot.save(date_key, current_lessons)
-                        for lesson in updated:
-                            try:
-                                await bot.send_message(settings.chat_id, schedule_updated_text(lesson))
-                            except Exception:
-                                logging.exception("Не удалось отправить уведомление об изменении пары")
-                        for lesson in cancelled:
-                            try:
-                                await bot.send_message(settings.chat_id, lesson_cancelled_text(lesson))
-                            except Exception:
-                                logging.exception("Не удалось отправить уведомление об отмене пары")
+                    all_lessons = fetched_lessons
+                    has_schedule_data = True
 
                 if not has_schedule_data:
                     await asyncio.sleep(30)
